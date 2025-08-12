@@ -120,12 +120,13 @@ jobs:
       - name: Pack ZIP
         run: npm run pack:zip
 
-      - name: Commit & push (exclude node_modules / include ZIP)
+        - name: Commit & push (exclude node_modules / include ZIP)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # เพิ่มซอร์สทั้งหมด ยกเว้นโฟลเดอร์หนัก แล้วบังคับใส่ไฟล์ ZIP
-          git add . ':!node_modules' ':!.next' ':!dist'
+          # เพิ่มซอร์สทั้งหมด ยกเว้นโฟลเดอร์หนัก
+          git add . ':!node_modules' ':!.next'
+          # บังคับเพิ่มไฟล์ ZIP
           git add -f dist/flowlite-source.zip
           git commit -m "chore(bootstrap): minimal FlowLite scaffold + zip" || true
           git push
