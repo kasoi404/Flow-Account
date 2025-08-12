@@ -107,12 +107,12 @@ jobs:
           git commit -m "chore(bootstrap): minimal FlowLite scaffold + zip" || true
           git push
 
-      - name: Create Release with ZIP
+       - name: Create Release with ZIP
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.0.${{ github.run_number }}
-          name: FlowLite v0.0.${{ github.run_number }} (minimal)
-          body: Minimal scaffolding created by workflow. ZIP attached.
+          tag_name: "v0.0.${{ github.run_number }}"
+          name: "FlowLite v0.0.${{ github.run_number }} (minimal)"
+          body: "Minimal scaffolding created by workflow. ZIP attached."
           files: dist/flowlite-source.zip
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKE
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
