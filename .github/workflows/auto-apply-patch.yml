@@ -1,0 +1,402 @@
+name: Auto Apply Patch (PR Bot)
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  apply-patch:
+    if: contains(github.event.comment.body, '/apply-patch')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse command
+        id: parse
+        run: |
+          # expected format: /apply-patch <branch-name>
+          BODY="${{ github.event.comment.body }}"
+          BRANCH=$(echo "$BODY" | awk '{print $2}')
+          if [ -z "$BRANCH" ]; then BRANCH="feat/mvp-finalize"; fi
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Create working branch
+        run: |
+          git checkout -b "${{ steps.parse.outputs.branch }}" || git checkout "${{ steps.parse.outputs.branch }}"
+
+      - name: Write feature patch (MVP finalize)
+        shell: bash
+        run: |
+          cat > feature.patch <<'PATCH'
+*** Begin Patch
+*** Add File: app/api/auth/[...nextauth]/route.ts
++export { GET, POST } from '@/lib/auth';
++
+*** End Patch
+*** Begin Patch
+*** Update File: app/api/payments/route.ts
+@@
+ import { PrismaClient } from '@prisma/client';
+ import { requireRole } from '@/lib/rbac';
+ import { buildEntries, DEFAULT_MAP } from '@/lib/gl/mapping';
+ import { nextDocNumber } from '@/lib/doc/number';
++import Decimal from 'decimal.js';
++import { audit } from '@/lib/audit';
+ const prisma = new PrismaClient();
+ 
++function calcInvoiceTotal(inv:any){
++  const lines = inv.items.map((it:any)=>({
++    qty: Number(it.qty),
++    unitPrice: Number(it.unitPrice),
++    lineDiscount: Number(it.lineDiscount||0)
++  }));
++  const subtotal = lines.reduce((a,l)=> new Decimal(a).plus(new Decimal(l.qty).times(l.unitPrice).minus(l.lineDiscount)), new Decimal(0));
++  const afterDiscount = subtotal.plus(inv.fee||0).plus(inv.shipping||0).minus(inv.discount||0);
++  const vat = inv.vatMode==='EXCLUSIVE' ? afterDiscount.mul(0.07) : afterDiscount.minus(afterDiscount.div(1.07));
++  const total = inv.vatMode==='EXCLUSIVE' ? afterDiscount.plus(vat) : afterDiscount;
++  return { total: +total.toFixed(2) };
++}
+ 
+ export async function POST(req:Request){
+   const body = await req.json();
+   const { orgId, invoiceId, method, amount, whtAmount } = body;
+   await requireRole(orgId, ['OWNER','ADMIN','ACCOUNTANT']);
+ 
+   return await prisma.$transaction(async (tx)=>{
+-    const inv = await tx.invoice.findUnique({ where:{ id: invoiceId }, include:{ payments:true }});
++    const inv = await tx.invoice.findUnique({ where:{ id: invoiceId }, include:{ payments:true, items:true }});
+     if (!inv) throw new Response('Not found', { status:404 });
+ 
+     const pay = await tx.payment.create({ data:{ orgId, invoiceId, method, amount, fee:0 }});
+-    const paidSum = inv.payments.reduce((a,b)=> a + Number(b.amount), 0) + Number(amount) + Number(whtAmount||0);
+-    const status = paidSum >= Number(inv.items.length>0 ? /* total to check from calc stored? fallback */ 999999 : 0) ? 'PAID':'PARTIALLY_PAID'; // simplified: UI computes total to confirm
++    const { total } = calcInvoiceTotal(inv);
++    const paidSum = inv.payments.reduce((a,b)=> a + Number(b.amount), 0) + Number(amount) + Number(whtAmount||0);
++    const status = paidSum + 1e-6 >= total ? 'PAID':'PARTIALLY_PAID';
+     await tx.invoice.update({ where:{ id: inv.id }, data:{ status }});
+ 
+     // GL
+     const journal = await tx.journal.create({ data:{ orgId, refType:'PAYMENT', refId: pay.id }});
+     const map = { CASH:DEFAULT_MAP.CASH, AR:DEFAULT_MAP.AR, WHT_RECEIVABLE: DEFAULT_MAP.WHT_RECEIVABLE };
+     const ents = buildEntries(map as any, { type:'PAYMENT_RECEIVED', amounts:{ cash: Number(amount), wht: Number(whtAmount||0) }});
+     for (const e of ents){
+       const acc = await tx.gLAccount.findFirst({ where:{ orgId, code: e.accountCode }});
+       await tx.gLEntry.create({ data:{ journalId: journal.id, accountId: acc!.id, debit: e.debit, credit: e.credit }});
+     }
+ 
+     // Receipt number
+     const last = await tx.receipt.findFirst({ where:{ orgId }, orderBy:{ createdAt:'desc' }});
+     const org = await tx.organization.findUnique({ where:{ id: orgId }});
+     const number = nextDocNumber('RC-YYYYMM-####', last?.number);
+     const receipt = await tx.receipt.create({ data:{ orgId, invoiceId: inv.id, number }});
+ 
++    // Audit
++    const userId = 'system'; // หรือดึงจาก session
++    await audit(orgId, userId, 'PAYMENT_RECEIVED', 'payment', pay.id, { invoiceId, method, amount, whtAmount, status });
++
+     return Response.json({ payment: pay, receipt });
+   });
+ }
+*** End Patch
+*** Begin Patch
+*** Update File: app/api/invoices/route.ts
+@@
+ import { PrismaClient, VatMode } from '@prisma/client';
+ import { computeVAT } from '@/lib/calc/vat';
+ import { fifoIssue } from '@/lib/calc/fifo';
+ import { buildEntries, DEFAULT_MAP } from '@/lib/gl/mapping';
+ import { nextDocNumber } from '@/lib/doc/number';
+ import { requireRole } from '@/lib/rbac';
++import { audit } from '@/lib/audit';
+ 
+ const prisma = new PrismaClient();
+ 
+ export async function GET(req:Request){
+   const { searchParams } = new URL(req.url);
+@@
+     for (const e of entries){
+       const acc = await tx.gLAccount.findFirst({ where:{ orgId, code: e.accountCode }});
+       await tx.gLEntry.create({ data:{ journalId: journal.id, accountId: acc!.id, debit: e.debit, credit: e.credit }});
+     }
+ 
++    // Audit
++    const userId = 'system';
++    await audit(orgId, userId, 'INVOICE_ISSUED', 'invoice', inv.id, { number, total, vat });
++
+     return Response.json(inv, { status:201 });
+   });
+ }
+*** End Patch
+*** Begin Patch
+*** Update File: app/api/documents/[id]/pdf/route.ts
+@@
+-import { PrismaClient } from '@prisma/client';
+-import { PDFDownloadLink, pdf } from '@react-pdf/renderer';
++import { PrismaClient } from '@prisma/client';
++import { pdf } from '@react-pdf/renderer';
+ import InvoicePDF from '@/components/pdf/InvoicePDF';
++import { buildPromptPayPayload, renderPromptPayQR } from '@/lib/promptpay';
+ const prisma = new PrismaClient();
+ 
+ export async function GET(req:Request, { params }:{ params:{ id:string }}){
+   const inv = await prisma.invoice.findUnique({ where:{ id: params.id }, include:{ items:true, contact:true, org:true, whts:true, payments:true }});
+   if (!inv) return new Response('Not found', { status:404 });
+ 
+-  const doc = InvoicePDF({ invoice: inv }); // JSX component
+-  const blob = await pdf(doc).toBuffer();
++  const total = inv.items.reduce((a:any,it:any)=> a + Number(it.qty)*Number(it.unitPrice) - Number(it.lineDiscount||0), 0);
++  const vat = inv.vatMode==='EXCLUSIVE'? total*0.07 : total - (total/1.07);
++  const grand = inv.vatMode==='EXCLUSIVE'? total+vat : total;
++  const payload = buildPromptPayPayload(inv.org.promptpayId || '', grand);
++  const qrDataUrl = await renderPromptPayQR(payload, 220);
++
++  const doc = InvoicePDF({ invoice: inv, qrDataUrl });
++  const blob = await pdf(doc).toBuffer();
+   return new Response(blob, { headers: { 'Content-Type':'application/pdf', 'Content-Disposition': `inline; filename="${inv.number}.pdf"` }});
+ }
+*** End Patch
+*** Begin Patch
+*** Update File: components/pdf/InvoicePDF.tsx
+@@
+-import { Document, Page, Text, View, StyleSheet, Image } from '@react-pdf/renderer';
+-import { buildPromptPayPayload, renderPromptPayQR } from '@/lib/promptpay';
++import { Document, Page, Text, View, StyleSheet, Image } from '@react-pdf/renderer';
+@@
+-export default function InvoicePDF({ invoice }: any){
++export default function InvoicePDF({ invoice, qrDataUrl }: any){
+   const lang = invoice.contact.language || 'th';
+   const t = (th:string, en:string)=> lang==='th'? th: en;
+   const total = invoice.items.reduce((a:any,it:any)=> a + Number(it.qty)*Number(it.unitPrice) - Number(it.lineDiscount||0), 0);
+   const vat = invoice.vatMode==='EXCLUSIVE'? total*0.07 : total - (total/1.07);
+   const grand = invoice.vatMode==='EXCLUSIVE'? total+vat : total;
+@@
+-        <View style={{ marginTop:16 }}>
+-          <Text>{t('ชำระผ่าน PromptPay','Pay via PromptPay')}</Text>
+-          <Text>{ppPayload.slice(0,32)}... (scan in app)</Text>
+-        </View>
++        <View style={{ marginTop:16, flexDirection:'row', gap:12, alignItems:'center' }}>
++          <View>
++            <Text>{t('ชำระผ่าน PromptPay','Pay via PromptPay')}</Text>
++            <Text>{invoice.org.promptpayId || '-'}</Text>
++          </View>
++          {qrDataUrl ? <Image src={qrDataUrl} style={{ width:100, height:100 }}/> : null}
++        </View>
+*** End Patch
+*** Begin Patch
+*** Add File: app/api/withholdings/[id]/pdf/route.ts
++import { PrismaClient } from '@prisma/client';
++import { Document, Page, Text, View, StyleSheet, pdf } from '@react-pdf/renderer';
++const prisma = new PrismaClient();
++const styles = StyleSheet.create({ page:{ padding:24, fontSize:10 }, h1:{ fontSize:14, marginBottom:8 }});
++
++export async function GET(req:Request,{params}:{params:{id:string}}){
++  const w = await prisma.withholding.findUnique({ where:{ id: params.id }, include:{ org:true, invoice:true }});
++  if (!w) return new Response('Not found', { status:404 });
++  const Doc = () => (
++    <Document><Page size="A4" style={styles.page}>
++      <Text style={styles.h1}>หนังสือรับรองการหักภาษี ณ ที่จ่าย ({w.type==='PND3'?'ภ.ง.ด.3':'ภ.ง.ด.53'})</Text>
++      <Text>ผู้จ่าย: {w.org.name} ({w.org.taxId||'-'})</Text>
++      <Text>อ้างอิงเอกสาร: {w.invoice?.number||'-'}</Text>
++      <Text>ฐานภาษี: {Number(w.baseAmount).toFixed(2)} บาท</Text>
++      <Text>อัตรา: {Number(w.rate).toFixed(2)} %</Text>
++      <Text>ภาษีหัก: {Number(w.amount).toFixed(2)} บาท</Text>
++      <View style={{ marginTop:12 }}>
++        <Text>ลงชื่อ.......................................</Text>
++        <Text>วันที่: {new Date().toLocaleDateString('th-TH')}</Text>
++      </View>
++    </Page></Document>
++  );
++  const buf = await pdf(<Doc/>).toBuffer();
++  return new Response(buf, { headers:{ 'Content-Type':'application/pdf' }});
++}
++
+*** End Patch
+*** Begin Patch
+*** Add File: app/api/reports/vat/route.ts
++import { PrismaClient } from '@prisma/client';
++const prisma = new PrismaClient();
++
++export async function GET(req:Request){
++  const { searchParams } = new URL(req.url);
++  const orgId = searchParams.get('orgId')!;
++  const start = new Date(searchParams.get('start')!);
++  const end = new Date(searchParams.get('end')!);
++  const invs = await prisma.invoice.findMany({
++    where:{ orgId, createdAt:{ gte:start, lte:end }, status:{ in:['ISSUED','PARTIALLY_PAID','PAID'] }},
++    include:{ items:true }
++  });
++  const docs = invs.map(inv=>{
++    const subtotal = inv.items.reduce((a,it)=> a + Number(it.qty)*Number(it.unitPrice) - Number(it.lineDiscount||0), 0);
++    const vat = inv.vatMode==='EXCLUSIVE'? +(subtotal*0.07).toFixed(2) : +(subtotal - subtotal/1.07).toFixed(2);
++    return { number: inv.number, date: inv.createdAt, vat };
++  });
++  const vatSale = docs.reduce((a,b)=> a + b.vat, 0);
++  return Response.json({ vatSale, docs });
++}
++
+*** End Patch
+*** Begin Patch
+*** Add File: app/api/reports/gl/route.ts
++import { PrismaClient } from '@prisma/client';
++const prisma = new PrismaClient();
++
++export async function GET(req:Request){
++  const { searchParams } = new URL(req.url);
++  const orgId = searchParams.get('orgId')!;
++  const entries = await prisma.gLEntry.findMany({
++    where:{ journal:{ orgId }},
++    include:{ account:true, journal:true }
++  });
++  const map = new Map<string, { name:string, debit:number, credit:number }>();
++  for (const e of entries){
++    const code = e.account.code;
++    if (!map.has(code)) map.set(code, { name: e.account.name, debit:0, credit:0 });
++    const row = map.get(code)!;
++    row.debit += Number(e.debit);
++    row.credit += Number(e.credit);
++  }
++  return Response.json({ trial: Array.from(map, ([code,v])=>({ code, ...v })) });
++}
++
+*** End Patch
+*** Begin Patch
+*** Add File: lib/pwa/offlineQueue.ts
++export type Draft = { id:string; payload:any; url:string; method:'POST'|'PUT' };
++const KEY = 'flowlite-queue';
++export function enqueue(d:Draft){
++  const q:Draft[] = JSON.parse(typeof localStorage!=='undefined' ? (localStorage.getItem(KEY)||'[]') : '[]');
++  q.push(d);
++  if (typeof localStorage!=='undefined') localStorage.setItem(KEY, JSON.stringify(q));
++}
++export async function flush(){
++  const q:Draft[] = JSON.parse(typeof localStorage!=='undefined' ? (localStorage.getItem(KEY)||'[]') : '[]');
++  const rest:Draft[] = [];
++  for (const d of q){
++    try{
++      await fetch(d.url, { method:d.method, headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(d.payload) });
++    }catch(e){
++      rest.push(d);
++    }
++  }
++  if (typeof localStorage!=='undefined') localStorage.setItem(KEY, JSON.stringify(rest));
++}
++
+*** End Patch
+*** Begin Patch
+*** Add File: lib/audit.ts
++import { PrismaClient } from '@prisma/client';
++const prisma = new PrismaClient();
++export async function audit(orgId:string, userId:string, action:string, entity:string, entityId:string, meta?:any){
++  try{
++    await prisma.auditLog.create({ data:{ orgId, userId, action, entity, entityId, meta }});
++  }catch(e){
++    console.error('audit failed', e);
++  }
++}
++
+*** End Patch
+PATCH
+
+      - name: Apply feature patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git apply --whitespace=fix feature.patch
+          git add .
+          git commit -m "feat(core): finalize MVP — totals/NextAuth/QR/WHT/Reports/offline/audit" || echo "No changes"
+
+      - name: Write release asset patch (workflow + scripts)
+        shell: bash
+        run: |
+          mkdir -p .github/workflows
+          cat > release.patch <<'PATCH'
+*** Begin Patch
+*** Add File: .github/workflows/release.yml
++name: Release (tag push)
++
++on:
++  push:
++    tags:
++      - 'v*'
++
++permissions:
++  contents: write
++
++jobs:
++  build-and-release:
++    runs-on: ubuntu-latest
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
++
++      - name: Setup Node
++        uses: actions/setup-node@v4
++        with:
++          node-version: '20'
++          cache: 'npm'
++
++      - name: Install deps
++        run: npm ci
++
++      - name: Package source zip
++        run: npm run pack:zip
++
++      - name: Create Release & Upload assets
++        uses: softprops/action-gh-release@v2
++        with:
++          files: |
++            dist/flow-account-source.zip
++        env:
++          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++
+*** End Patch
+*** Begin Patch
+*** Update File: package.json
+@@
+-    "pack": "zip -r flowlite.zip . -x \"node_modules/*\" \"*.log\" \".next/*\""
++    "pack:zip": "mkdir -p dist && cross-zip -q ./ ./dist/flow-account-source.zip -x node_modules/** -x .next/** -x coverage/** -x dist/** -x .git/** -x '*.log' -x '*.zip'",
++    "pack:build": "mkdir -p dist && cross-zip -q ./.next ./dist/flow-account-build.zip"
+   },
+   "devDependencies": {
++    "cross-zip": "^7.0.0"
+   }
+ }
+*** End Patch
+PATCH
+
+      - name: Apply release patch
+        run: |
+          git apply --whitespace=fix release.patch
+          npm pkg set devDependencies.cross-zip="^7.0.0" >/dev/null 2>&1 || true
+          npm install
+          git add .
+          git commit -m "chore(ci): release asset automation (zip + upload on tag)" || echo "No changes"
+
+      - name: Push branch
+        run: |
+          git push -u origin "${{ steps.parse.outputs.branch }}"
+
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: ${{ steps.parse.outputs.branch }}
+          title: "feat(core): finalize MVP + release asset automation"
+          body: |
+            - Finalize MVP (totals calc, NextAuth route, real PromptPay QR in PDF, WHT PDF, VAT/GL reports, offline queue, audit logs)
+            - Add release workflow: on tag push `v*` → build source zip → upload Release asset
+          base: ${{ github.event.repository.default_branch }}
+          labels: enhancement, automated
