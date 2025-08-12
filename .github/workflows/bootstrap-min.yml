@@ -1,0 +1,80 @@
+name: Bootstrap Minimal FlowLite
+
+on: workflow_dispatch
+
+permissions:
+  contents: write
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Create minimal project files
+        run: |
+          set -e
+          mkdir -p app public prisma
+          cat > README.md <<'MD'
+          # FlowLite (Minimal Bootstrap)
+          ใช้เป็นจุดเริ่มต้นได้เลย
+          MD
+          cat > package.json <<'JSON'
+          { "name":"flowlite","private":true,
+            "scripts":{"dev":"next dev","build":"next build","start":"next start",
+              "db:dev":"prisma migrate dev","db:seed":"tsx prisma/seed.ts",
+              "pack:zip":"mkdir -p dist && zip -r dist/flowlite-source.zip . -x \"node_modules/*\" \".next/*\" \"dist/*\" \".git/*\" \"*.log\" \"*.zip\""
+            },
+            "dependencies":{"next":"14.2.4","react":"18.3.1","react-dom":"18.3.1","@prisma/client":"^5.16.2"},
+            "devDependencies":{"prisma":"^5.16.2","tsx":"^4.16.2","typescript":"^5.5.3","@types/node":"^20.14.10"}
+          }
+          JSON
+          cat > tsconfig.json <<'JSON'
+          {"compilerOptions":{"target":"ES2022","lib":["dom","es2022"],"module":"esnext","moduleResolution":"bundler","strict":true,"noEmit":true,"jsx":"preserve"},"include":["**/*.ts","**/*.tsx"]}
+          JSON
+          cat > next.config.js <<'JS'
+          module.exports = {};
+          JS
+          cat > app/page.tsx <<'TSX'
+          export default function Home(){return (<main style={{padding:16}}><h1>FlowLite</h1><p>Minimal bootstrap ready.</p></main>);}
+          TSX
+          cat > public/manifest.json <<'JSON'
+          {"name":"FlowLite","short_name":"FlowLite","start_url":"/","display":"standalone","background_color":"#ffffff","theme_color":"#0ea5e9","icons":[]}
+          JSON
+          cat > prisma/schema.prisma <<'PRISMA'
+          generator client { provider = "prisma-client-js" }
+          datasource db { provider = "postgresql"; url = env("DATABASE_URL") }
+          model User { id String @id @default(cuid()) email String @unique createdAt DateTime @default(now()) }
+          PRISMA
+          cat > prisma/seed.ts <<'TS'
+          import { PrismaClient } from '@prisma/client'; const p=new PrismaClient();
+          async function main(){ await p.user.create({data:{email:'demo@flowlite.app'}}); } main().finally(()=>p.$disconnect());
+          TS
+          cat > .env.example <<'ENV'
+          DATABASE_URL=postgresql://postgres:password@host:5432/postgres
+          ENV
+
+      - name: Install deps
+        run: npm i
+
+      - name: Pack ZIP
+        run: npm run pack:zip
+
+      - name: Commit & push files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore(bootstrap): minimal FlowLite scaffold" || true
+          git push
+
+      - name: Create Release with ZIP
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.0.1
+          name: FlowLite v0.0.1 (minimal)
+          body: Minimal scaffolding created by workflow.
+          files: dist/flowlite-source.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
