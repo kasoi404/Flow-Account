@@ -10,7 +10,8 @@ jobs:
   go:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -18,7 +19,8 @@ jobs:
         run: |
           set -e
           mkdir -p app public prisma
-          # .gitignore เพื่อกันไฟล์หนัก
+
+          # .gitignore กันไฟล์หนัก
           cat > .gitignore <<'GIT'
           node_modules
           .next
@@ -27,11 +29,18 @@ jobs:
           *.zip
           GIT
 
+          # README
           cat > README.md <<'MD'
           # FlowLite (Minimal Bootstrap)
-          ใช้เป็นจุดเริ่มต้น / มีสคริปต์สร้าง ZIP และ Release ให้อัตโนมัติ
+          ใช้เป็นจุดเริ่มต้น / มีสคริปต์สร้าง ZIP และ Release อัตโนมัติ
+          ## Run local
+          npm i
+          npm run db:dev
+          npm run db:seed
+          npm run dev
           MD
 
+          # package.json
           cat > package.json <<'JSON'
           {
             "name": "flowlite",
@@ -59,22 +68,34 @@ jobs:
           }
           JSON
 
+          # tsconfig
           cat > tsconfig.json <<'JSON'
           { "compilerOptions": { "target":"ES2022","lib":["dom","es2022"],"module":"esnext","moduleResolution":"bundler","strict":true,"noEmit":true,"jsx":"preserve" }, "include":["**/*.ts","**/*.tsx"] }
           JSON
 
+          # next.config.js
           cat > next.config.js <<'JS'
           module.exports = {};
           JS
 
+          # หน้าหลัก
           cat > app/page.tsx <<'TSX'
-          export default function Home(){return (<main style={{padding:16}}><h1>FlowLite</h1><p>Minimal bootstrap ready.</p></main>);}
+          export default function Home(){
+            return (
+              <main style={{padding:16}}>
+                <h1>FlowLite</h1>
+                <p>Minimal bootstrap ready.</p>
+              </main>
+            );
+          }
           TSX
 
+          # PWA manifest (placeholder)
           cat > public/manifest.json <<'JSON'
           { "name":"FlowLite","short_name":"FlowLite","start_url":"/","display":"standalone","background_color":"#ffffff","theme_color":"#0ea5e9","icons":[] }
           JSON
 
+          # Prisma schema + seed
           cat > prisma/schema.prisma <<'PRISMA'
           generator client { provider = "prisma-client-js" }
           datasource db { provider = "postgresql"; url = env("DATABASE_URL") }
@@ -82,11 +103,13 @@ jobs:
           PRISMA
 
           cat > prisma/seed.ts <<'TS'
-          import { PrismaClient } from '@prisma/client'; const p=new PrismaClient();
-          async function main(){ await p.user.create({data:{email:'demo@flowlite.app'}}); console.log('seed ok'); }
+          import { PrismaClient } from '@prisma/client';
+          const p = new PrismaClient();
+          async function main(){ await p.user.create({ data:{ email:'demo@flowlite.app' } }); console.log('seed ok'); }
           main().finally(()=>p.$disconnect());
           TS
 
+          # env example
           cat > .env.example <<'ENV'
           DATABASE_URL=postgresql://postgres:password@host:5432/postgres
           ENV
@@ -101,17 +124,17 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # ใส่ซอร์สทั้งหมด ยกเว้น node_modules/.next/dist และบังคับใส่ ZIP
+          # เพิ่มซอร์สทั้งหมด ยกเว้นโฟลเดอร์หนัก แล้วบังคับใส่ไฟล์ ZIP
           git add . ':!node_modules' ':!.next' ':!dist'
           git add -f dist/flowlite-source.zip
           git commit -m "chore(bootstrap): minimal FlowLite scaffold + zip" || true
           git push
 
-       - name: Create Release with ZIP
+      - name: Create Release with ZIP
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "v0.0.${{ github.run_number }}"
-          name: "FlowLite v0.0.${{ github.run_number }} (minimal)"
+          tag_name: "flowlite-bootstrap-${{ github.run_id }}"
+          name: "FlowLite bootstrap ${{ github.run_id }}"
           body: "Minimal scaffolding created by workflow. ZIP attached."
           files: dist/flowlite-source.zip
         env:
