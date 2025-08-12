@@ -1,0 +1,521 @@
+name: Bootstrap FlowLite & Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Generate project files
+        run: |
+          set -e
+
+          mkdir -p app/(auth)/sign-in app/api/auth/[...nextauth] app/api/invoices app/api/payments app/api/documents/[id]/pdf app/api/reports/vat app/api/reports/gl app/api/withholdings/[id]/pdf components/nav components/pdf lib/calc lib/gl lib/doc lib/pwa prisma public/icons styles
+
+          # package.json
+          cat > package.json <<'JSON'
+          {
+            "name": "flowlite",
+            "private": true,
+            "scripts": {
+              "dev": "next dev",
+              "build": "next build",
+              "start": "next start",
+              "db:migrate": "prisma migrate deploy",
+              "db:dev": "prisma migrate dev",
+              "db:seed": "tsx prisma/seed.ts",
+              "test": "vitest run",
+              "test:e2e": "playwright test",
+              "format": "prettier -w .",
+              "pack:zip": "mkdir -p dist && zip -r dist/flow-account-source.zip . -x \"node_modules/*\" \".next/*\" \"dist/*\" \".git/*\" \"*.log\" \"*.zip\""
+            },
+            "dependencies": {
+              "@auth/core": "^0.18.0",
+              "@prisma/client": "^5.16.2",
+              "@react-pdf/renderer": "^3.4.5",
+              "@supabase/supabase-js": "^2.45.0",
+              "@tanstack/react-query": "^5.30.0",
+              "bcryptjs": "^2.4.3",
+              "chart.js": "^4.4.3",
+              "date-fns": "^3.6.0",
+              "decimal.js": "^10.4.3",
+              "i18next": "^23.11.5",
+              "lucide-react": "^0.452.0",
+              "next": "14.2.4",
+              "next-auth": "^4.24.7",
+              "next-pwa": "^5.6.0",
+              "qrcode": "^1.5.4",
+              "react": "18.3.1",
+              "react-dom": "18.3.1",
+              "react-hook-form": "^7.52.0",
+              "uuid": "^9.0.1",
+              "zod": "^3.23.8"
+            },
+            "devDependencies": {
+              "@playwright/test": "^1.46.0",
+              "@types/bcryptjs": "^2.4.6",
+              "@types/node": "^20.14.10",
+              "@types/react": "^18.3.5",
+              "@types/react-dom": "^18.3.0",
+              "autoprefixer": "^10.4.19",
+              "eslint": "^9.7.0",
+              "postcss": "^8.4.39",
+              "prettier": "^3.3.2",
+              "prisma": "^5.16.2",
+              "tailwindcss": "^3.4.7",
+              "tsx": "^4.16.2",
+              "typescript": "^5.5.3",
+              "vitest": "^1.6.0"
+            }
+          }
+          JSON
+
+          # next/tailwind/ts/postcss
+          cat > next.config.js <<'JS'
+          const withPWA = require('next-pwa')({
+            dest: 'public',
+            disable: process.env.NODE_ENV === 'development',
+            register: true,
+            skipWaiting: true,
+            sw: 'sw.js'
+          });
+          module.exports = withPWA({
+            experimental: { serverActions: { allowedOrigins: ['*'] } },
+            images: { domains: ['localhost', 'your-supabase-project.supabase.co'] }
+          });
+          JS
+
+          cat > tsconfig.json <<'JSON'
+          { "compilerOptions": { "target":"ES2022","lib":["dom","dom.iterable","es2022"],"allowJs":false,"skipLibCheck":true,"strict":true,"noEmit":true,"module":"esnext","moduleResolution":"bundler","resolveJsonModule":true,"isolatedModules":true,"jsx":"preserve","baseUrl":".","paths":{"@/*":["./*"]}},"include":["next-env.d.ts","**/*.ts","**/*.tsx"],"exclude":["node_modules"] }
+          JSON
+
+          cat > tailwind.config.ts <<'TS'
+          import type { Config } from 'tailwindcss'
+          const config: Config = { content: ["./app/**/*.{ts,tsx}","./components/**/*.{ts,tsx}"], theme:{extend:{}}, plugins:[] }
+          export default config
+          TS
+
+          cat > postcss.config.js <<'JS'
+          module.exports = { plugins: { tailwindcss: {}, autoprefixer: {} } }
+          JS
+
+          cat > styles/globals.css <<'CSS'
+          @tailwind base;
+          @tailwind components;
+          @tailwind utilities;
+          .input{ @apply border rounded p-2 w-full; }
+          .btn{ @apply border rounded px-3 py-2; }
+          .btn-primary{ @apply bg-sky-600 text-white; }
+          .navbar{ @apply fixed bottom-0 inset-x-0 h-14 bg-white border-t flex justify-around items-center; }
+          CSS
+
+          # PWA
+          cat > public/manifest.json <<'JSON'
+          { "name":"FlowLite Accounting","short_name":"FlowLite","description":"PWA บัญชีสำหรับธุรกิจไทย","start_url":"/","display":"standalone","background_color":"#ffffff","theme_color":"#0ea5e9","icons":[{"src":"/icons/icon-192.png","sizes":"192x192","type":"image/png"},{"src":"/icons/icon-512.png","sizes":"512x512","type":"image/png"}] }
+          JSON
+
+          cat > public/sw.js <<'JS'
+          const CACHE='flowlite-shell-v1';const SHELL=['/','/manifest.json','/icons/icon-192.png','/icons/icon-512.png'];
+          self.addEventListener('install',e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL)))});
+          self.addEventListener('activate',e=>{e.waitUntil(self.clients.claim())});
+          self.addEventListener('fetch',e=>{const u=new URL(e.request.url);if(u.pathname.startsWith('/api/')){e.respondWith(fetch(e.request).catch(()=>caches.match(e.request)))}else{e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request)))}})
+          JS
+
+          # App shell
+          cat > app/layout.tsx <<'TSX'
+          import './globals.css';
+          export const metadata = { title: 'FlowLite', description: 'Thai Accounting PWA' };
+          export default function RootLayout({ children }:{children:React.ReactNode}) {
+            return <html lang="th"><body>{children}</body></html>;
+          }
+          TSX
+
+          cat > app/page.tsx <<'TSX'
+          import BottomNav from '@/components/nav/BottomNav';
+          export default function Home(){
+            return <main className="p-4 pb-16">
+              <h1 className="text-2xl font-bold">FlowLite</h1>
+              <p className="text-gray-600">Thai Accounting PWA (Quotation → Invoice → Payment → Receipt)</p>
+              <BottomNav/>
+            </main>
+          }
+          TSX
+
+          cat > components/nav/BottomNav.tsx <<'TSX'
+          'use client';
+          import Link from 'next/link';
+          import { Home, Receipt, Package, BarChart3, Settings } from 'lucide-react';
+          export default function BottomNav(){
+            return <nav className="navbar">
+              <Link href="/"><Home/></Link>
+              <Link href="/sales"><Receipt/></Link>
+              <Link href="/inventory"><Package/></Link>
+              <Link href="/reports"><BarChart3/></Link>
+              <Link href="/settings"><Settings/></Link>
+            </nav>;
+          }
+          TSX
+
+          # Auth (NextAuth)
+          cat > app/api/auth/[...nextauth]/route.ts <<'TS'
+          export { GET, POST } from '@/lib/auth';
+          TS
+
+          cat > lib/auth.ts <<'TS'
+          import NextAuth from "next-auth";
+          import Credentials from "next-auth/providers/credentials";
+          import Google from "next-auth/providers/google";
+          import { PrismaClient } from "@prisma/client";
+          import bcrypt from 'bcryptjs';
+          const prisma = new PrismaClient();
+          export const authOptions:any = {
+            session: { strategy: "jwt" },
+            providers: [
+              Credentials({
+                name:"credentials",
+                credentials:{ email:{label:"email"}, password:{label:"password", type:"password"} },
+                async authorize(creds){
+                  if(!creds?.email||!creds?.password) return null;
+                  const user = await prisma.user.findUnique({ where:{ email:creds.email }});
+                  if(!user || !user.passwordHash) return null;
+                  const ok = await bcrypt.compare(creds.password, user.passwordHash);
+                  return ok ? { id:user.id, email:user.email, name:user.name } : null;
+                }
+              }),
+              Google({ clientId: process.env.GOOGLE_CLIENT_ID!, clientSecret: process.env.GOOGLE_CLIENT_SECRET! })
+            ],
+            callbacks:{
+              async jwt({ token, user }){ if(user) token.uid = (user as any).id; return token; },
+              async session({ session, token }){ if(token?.uid) (session as any).userId = token.uid; return session; }
+            },
+            pages:{ signIn:"/(auth)/sign-in" }
+          };
+          export const { handlers:{ GET, POST }, auth } = NextAuth(authOptions);
+          TS
+
+          # Calc libs
+          cat > lib/calc/vat.ts <<'TS'
+          import Decimal from 'decimal.js';
+          export type Line = { qty:number; unitPrice:number; lineDiscount?:number };
+          export function computeVAT({vatMode, vatRate, lines, billDiscount=0, fee=0, shipping=0}:{vatMode:'INCLUSIVE'|'EXCLUSIVE'; vatRate:number; lines:Line[]; billDiscount?:number; fee?:number; shipping?:number;}){
+            const subtotal = lines.reduce((a,l)=> a.plus(new Decimal(l.qty).times(l.unitPrice).minus(l.lineDiscount||0)), new Decimal(0));
+            const after = subtotal.minus(billDiscount).plus(fee).plus(shipping);
+            if(vatMode==='EXCLUSIVE'){ const vat = after.mul(vatRate).div(100); return { subtotal:+subtotal.toFixed(2), afterDiscount:+after.toFixed(2), vat:+vat.toFixed(2), total:+after.plus(vat).toFixed(2) }; }
+            const base = after.div(new Decimal(1).plus(vatRate/100)); const vat = after.minus(base); return { subtotal:+subtotal.toFixed(2), afterDiscount:+after.toFixed(2), vat:+vat.toFixed(2), total:+after.toFixed(2) };
+          }
+          TS
+
+          cat > lib/calc/wht.ts <<'TS'
+          import Decimal from 'decimal.js';
+          export const computeWHT=(base:number,rate:number)=> +new Decimal(base).mul(rate).div(100).toFixed(2);
+          export const netAfterWHT=(gross:number,wht:number)=> +(new Decimal(gross).minus(wht)).toFixed(2);
+          TS
+
+          cat > lib/gl/mapping.ts <<'TS'
+          export const DEFAULT_MAP = { CASH:'1100', AR:'1200', INVENTORY:'1300', AP:'2100', VAT_OUT:'2200', WHT_RECEIVABLE:'2300', REVENUE:'4100', COGS:'5100', EXPENSE:'6100' };
+          export function buildEntries(map:any, input:{ type:'INVOICE_ISSUED'|'PAYMENT_RECEIVED'; amounts:any }){
+            const e:any[]=[]; const A=input.amounts; const z=(n?:number)=>+(n||0).toFixed(2);
+            if(input.type==='INVOICE_ISSUED'){ e.push({accountCode:map.AR,debit:z(A.ar),credit:0}); e.push({accountCode:map.REVENUE,debit:0,credit:z(A.revenue)}); if(A.vat) e.push({accountCode:map.VAT_OUT,debit:0,credit:z(A.vat)}); if(A.cogs){ e.push({accountCode:map.COGS,debit:z(A.cogs),credit:0}); e.push({accountCode:map.INVENTORY,debit:0,credit:z(A.inventory)});} }
+            if(input.type==='PAYMENT_RECEIVED'){ e.push({accountCode:map.CASH,debit:z(A.cash),credit:0}); e.push({accountCode:map.AR,debit:0,credit:z(A.cash)}); if(A.wht){ e.push({accountCode:map.WHT_RECEIVABLE,debit:z(A.wht),credit:0}); e.push({accountCode:map.AR,debit:0,credit:z(A.wht)});} }
+            return e;
+          }
+          TS
+
+          cat > lib/doc/number.ts <<'TS'
+          export function nextDocNumber(fmt:string,last?:string,date=new Date()){ const y=''+date.getFullYear(); const m=(''+(date.getMonth()+1)).padStart(2,'0'); const prefix=fmt.replace('YYYY',y).replace('MM',m).replace('####',''); let seq=1; if(last&&last.startsWith(prefix)){ const n=parseInt(last.slice(prefix.length),10); if(!isNaN(n)) seq=n+1; } return prefix+(''+seq).padStart(4,'0'); }
+          TS
+
+          cat > lib/promptpay.ts <<'TS'
+          import * as QR from 'qrcode';
+          const ID=(id:string,val:string)=> id + (val.length.toString().padStart(2,'0')) + val;
+          function crc16(str:string){ let crc=0xFFFF; for(let i=0;i<str.length;i++){ crc^=str.charCodeAt(i)<<8; for(let j=0;j<8;j++){ crc=(crc&0x8000)!==0? (crc<<1)^0x1021 : crc<<1; crc&=0xFFFF; } } return crc.toString(16).padStart(4,'0'); }
+          export function buildPromptPayPayload(ppId:string, amount?:number){ const guid=ID('00','01')+ID('01',amount?'12':'11'); const data = guid + ID('29','0016A000000677010111'+ID('02', ppId)) + ID('58','TH') + ID('59','FlowLite') + (amount? ID('54', amount.toFixed(2)) : '') + '6304'; return data + crc16(data).toUpperCase(); }
+          export async function renderPromptPayQR(payload:string,w=220){ return await QR.toDataURL(payload,{width:w}); }
+          TS
+
+          # Prisma schema + seed
+          cat > prisma/schema.prisma <<'PRISMA'
+          generator client { provider = "prisma-client-js" }
+          datasource db { provider = "postgresql"; url = env("DATABASE_URL") }
+          model User { id String @id @default(cuid()) email String @unique name String? passwordHash String? image String? memberships Membership[] createdAt DateTime @default(now()) }
+          model Organization { id String @id @default(cuid()) name String taxId String? address String? promptpayId String? logoUrl String? docNumberFmt String @default("INV-YYYYMM-####") vatRate Decimal @default(7.0) users Membership[] contacts Contact[] items Item[] journals Journal[] invoices Invoice[] quotations Quotation[] bills Bill[] glAccounts GLAccount[] auditLogs AuditLog[] createdAt DateTime @default(now()) }
+          model Membership { id String @id @default(cuid()) userId String orgId String role Role user User @relation(fields:[userId],references:[id]) org Organization @relation(fields:[orgId],references:[id]) @@unique([userId,orgId]) }
+          enum Role { OWNER ADMIN ACCOUNTANT VIEWER }
+          model Contact { id String @id @default(cuid()) orgId String type ContactType name String taxId String? billingAddr String? language String @default("th") creditDays Int @default(0) org Organization @relation(fields:[orgId],references:[id]) }
+          enum ContactType { CUSTOMER SUPPLIER }
+          model Item { id String @id @default(cuid()) orgId String type ItemType sku String @unique nameTh String nameEn String? unit String @default("ชิ้น") taxRate Decimal @default(7.0) buyPrice Decimal @default(0) sellPrice Decimal @default(0) inventory Boolean @default(true) org Organization @relation(fields:[orgId],references:[id]) inventoryMoves InventoryMove[] }
+          enum ItemType { PRODUCT SERVICE }
+          model Quotation { id String @id @default(cuid()) orgId String number String @unique contactId String currency String @default("THB") vatMode VatMode @default(EXCLUSIVE) discount Decimal @default(0) note String? status QuoteStatus @default(DRAFT) items QuotationItem[] createdAt DateTime @default(now()) org Organization @relation(fields:[orgId],references:[id]) contact Contact @relation(fields:[contactId],references:[id]) }
+          enum VatMode { INCLUSIVE EXCLUSIVE } enum QuoteStatus { DRAFT SENT CONVERTED EXPIRED }
+          model QuotationItem { id String @id @default(cuid()) quotationId String itemId String description String? qty Decimal unitPrice Decimal lineDiscount Decimal @default(0) quotation Quotation @relation(fields:[quotationId],references:[id]) item Item @relation(fields:[itemId],references:[id]) }
+          model Invoice { id String @id @default(cuid()) orgId String number String @unique contactId String currency String @default("THB") vatMode VatMode @default(EXCLUSIVE) discount Decimal @default(0) fee Decimal @default(0) shipping Decimal @default(0) note String? status InvoiceStatus @default(DRAFT) items InvoiceItem[] payments Payment[] receipt Receipt? whts Withholding[] createdAt DateTime @default(now()) dueDate DateTime? org Organization @relation(fields:[orgId],references:[id]) contact Contact @relation(fields:[contactId],references:[id]) }
+          enum InvoiceStatus { DRAFT ISSUED PARTIALLY_PAID PAID VOID }
+          model InvoiceItem { id String @id @default(cuid()) invoiceId String itemId String description String? qty Decimal unitPrice Decimal lineDiscount Decimal @default(0) invoice Invoice @relation(fields:[invoiceId],references:[id]) item Item @relation(fields:[itemId],references:[id]) }
+          model Payment { id String @id @default(cuid()) orgId String invoiceId String? method String amount Decimal fee Decimal @default(0) slipUrl String? note String? createdAt DateTime @default(now()) invoice Invoice? @relation(fields:[invoiceId],references:[id]) org Organization @relation(fields:[orgId],references:[id]) }
+          model Receipt { id String @id @default(cuid()) orgId String number String @unique invoiceId String @unique pdfUrl String? createdAt DateTime @default(now()) org Organization @relation(fields:[orgId],references:[id]) invoice Invoice @relation(fields:[invoiceId],references:[id]) }
+          model Bill { id String @id @default(cuid()) orgId String number String @unique supplierId String status BillStatus @default(DRAFT) items BillItem[] createdAt DateTime @default(now()) org Organization @relation(fields:[orgId],references:[id]) supplier Contact @relation(fields:[supplierId],references:[id]) }
+          enum BillStatus { DRAFT POSTED PAID }
+          model BillItem { id String @id @default(cuid()) billId String itemId String qty Decimal unitCost Decimal bill Bill @relation(fields:[billId],references:[id]) item Item @relation(fields:[itemId],references:[id]) }
+          model Withholding { id String @id @default(cuid()) orgId String type WithholdingType invoiceId String? baseAmount Decimal rate Decimal amount Decimal pdfUrl String? createdAt DateTime @default(now()) org Organization @relation(fields:[orgId],references:[id]) invoice Invoice? @relation(fields:[invoiceId],references:[id]) }
+          enum WithholdingType { PND3 PND53 }
+          model GLAccount { id String @id @default(cuid()) orgId String code String name String type GLType org Organization @relation(fields:[orgId],references:[id]) @@unique([orgId,code]) }
+          enum GLType { ASSET LIABILITY EQUITY REVENUE EXPENSE COGS }
+          model Journal { id String @id @default(cuid()) orgId String refType String refId String date DateTime @default(now()) entries GLEntry[] org Organization @relation(fields:[orgId],references:[id]) }
+          model GLEntry { id String @id @default(cuid()) journalId String accountId String debit Decimal @default(0) credit Decimal @default(0) journal Journal @relation(fields:[journalId],references:[id]) account GLAccount @relation(fields:[accountId],references:[id]) }
+          model InventoryMove { id String @id @default(cuid()) orgId String itemId String type InventoryMoveType qty Decimal unitCost Decimal refType String refId String createdAt DateTime @default(now()) item Item @relation(fields:[itemId],references:[id]) org Organization @relation(fields:[orgId],references:[id]) }
+          enum InventoryMoveType { IN OUT }
+          model AuditLog { id String @id @default(cuid()) orgId String userId String action String entity String entityId String meta Json? createdAt DateTime @default(now()) org Organization @relation(fields:[orgId],references:[id]) }
+          PRISMA
+
+          cat > prisma/seed.ts <<'TS'
+          import { PrismaClient } from '@prisma/client'; import bcrypt from 'bcryptjs';
+          const prisma = new PrismaClient();
+          async function main(){
+            const pwd = await bcrypt.hash('demo1234', 10);
+            const user = await prisma.user.upsert({ where:{ email:'demo@flowlite.app' }, update:{}, create:{ email:'demo@flowlite.app', name:'Demo User', passwordHash: pwd }});
+            const org = await prisma.organization.create({ data:{ name:'FlowLite Co., Ltd.', taxId:'0105555555555', address:'Bangkok', promptpayId:'0812345678', vatRate:7, users:{ create:{ userId:user.id, role:'OWNER' }}}});
+            const customers = await prisma.$transaction([
+              prisma.contact.create({ data:{ orgId: org.id, type:'CUSTOMER', name:'บริษัท สยามเทรดดิ้ง', language:'th', creditDays:30 } }),
+              prisma.contact.create({ data:{ orgId: org.id, type:'CUSTOMER', name:'Bangkok Import Co.', language:'en', creditDays:15 } }),
+              prisma.contact.create({ data:{ orgId: org.id, type:'CUSTOMER', name:'เชียงใหม่โซลูชั่น', language:'th' } }),
+              prisma.contact.create({ data:{ orgId: org.id, type:'CUSTOMER', name:'Phuket Marine', language:'en' } }),
+              prisma.contact.create({ data:{ orgId: org.id, type:'CUSTOMER', name:'KhonKaen Retail', language:'th', creditDays:30 } })
+            ]);
+            const items = await prisma.$transaction([
+              prisma.item.create({ data:{ orgId: org.id, type:'PRODUCT', sku:'SKU-001', nameTh:'กล่อง 1', sellPrice:100, buyPrice:60, inventory:true } }),
+              prisma.item.create({ data:{ orgId: org.id, type:'SERVICE', sku:'SRV-001', nameTh:'ค่าจัดส่ง', sellPrice:80, buyPrice:0, inventory:false } })
+            ]);
+            for(const it of items.filter(i=>i.type==='PRODUCT')) await prisma.inventoryMove.create({ data:{ orgId: org.id, itemId: it.id, type:'IN', qty:100, unitCost: it.buyPrice, refType:'SEED', refId:'-' }});
+            await prisma.quotation.create({ data:{ orgId: org.id, number:'QT-202508-0001', contactId: customers[0].id, vatMode:'EXCLUSIVE', items:{ create:[{ itemId: items[0].id, qty:10, unitPrice:100 } ]}, status:'SENT' }});
+            await prisma.invoice.create({ data:{ orgId: org.id, number:'INV-202508-0001', contactId: customers[0].id, vatMode:'EXCLUSIVE', items:{ create:[{ itemId: items[0].id, qty:10, unitPrice:100 },{ itemId: items[1].id, qty:1, unitPrice:80 }]}, status:'ISSUED', note:'ขอบคุณ' }});
+            const gls=[{code:'1100',name:'เงินสด/ธนาคาร',type:'ASSET'},{code:'1200',name:'ลูกหนี้การค้า',type:'ASSET'},{code:'1300',name:'สินค้าคงเหลือ',type:'ASSET'},{code:'2100',name:'เจ้าหนี้การค้า',type:'LIABILITY'},{code:'2200',name:'ภาษีขายค้างจ่าย (VAT)',type:'LIABILITY'},{code:'2300',name:'ภาษีหัก ณ ที่จ่ายค้างรับ',type:'ASSET'},{code:'4100',name:'รายได้',type:'REVENUE'},{code:'5100',name:'ต้นทุนขาย',type:'COGS'},{code:'6100',name:'ค่าใช้จ่าย',type:'EXPENSE'}];
+            for(const g of gls) await prisma.gLAccount.create({ data:{ orgId: org.id, ...g }});
+            console.log('Seeded demo:', org.id);
+          }
+          main().catch(e=>{console.error(e);process.exit(1)}).finally(()=>prisma.$disconnect());
+          TS
+
+          # API: invoices (create/list) – simplified
+          cat > app/api/invoices/route.ts <<'TS'
+          import { PrismaClient } from '@prisma/client';
+          import { computeVAT } from '@/lib/calc/vat';
+          import { nextDocNumber } from '@/lib/doc/number';
+          const prisma = new PrismaClient();
+          export async function GET(req:Request){
+            const { searchParams } = new URL(req.url);
+            const orgId = searchParams.get('orgId')!;
+            const data = await prisma.invoice.findMany({ where:{ orgId }, include:{ items:true, contact:true }});
+            return Response.json(data);
+          }
+          export async function POST(req:Request){
+            const b = await req.json(); const { orgId, contactId, vatMode, discount=0, fee=0, shipping=0, lines=[] } = b;
+            const last = await prisma.invoice.findFirst({ where:{ orgId }, orderBy:{ createdAt:'desc' }});
+            const org = await prisma.organization.findUnique({ where:{ id: orgId }}); const number = nextDocNumber(org!.docNumberFmt||'INV-YYYYMM-####', last?.number);
+            const { vat, total, afterDiscount } = computeVAT({ vatMode, vatRate: Number(org!.vatRate||7), lines, billDiscount:discount, fee, shipping });
+            const inv = await prisma.invoice.create({ data:{ orgId, contactId, number, vatMode, discount, fee, shipping, status:'ISSUED', items:{ create: lines.map((l:any)=>({ itemId:l.itemId, qty:l.qty, unitPrice:l.unitPrice, lineDiscount:l.lineDiscount||0 })) } }});
+            return Response.json({ inv, totals:{ vat, total, afterDiscount }}, { status:201 });
+          }
+          TS
+
+          # API: payments – simplified
+          cat > app/api/payments/route.ts <<'TS'
+          import { PrismaClient } from '@prisma/client';
+          import Decimal from 'decimal.js';
+          import { nextDocNumber } from '@/lib/doc/number';
+          const prisma = new PrismaClient();
+          function calcTotal(inv:any){
+            const subtotal = inv.items.reduce((a:any,it:any)=> a + Number(it.qty)*Number(it.unitPrice) - Number(it.lineDiscount||0), 0);
+            const after = subtotal + Number(inv.fee||0) + Number(inv.shipping||0) - Number(inv.discount||0);
+            const vat = inv.vatMode==='EXCLUSIVE' ? after*0.07 : after - (after/1.07);
+            return +(inv.vatMode==='EXCLUSIVE' ? after+vat : after).toFixed(2);
+          }
+          export async function POST(req:Request){
+            const { orgId, invoiceId, method, amount, whtAmount=0 } = await req.json();
+            return await prisma.$transaction(async (tx)=>{
+              const inv = await tx.invoice.findUnique({ where:{ id: invoiceId }, include:{ payments:true, items:true }});
+              if(!inv) return new Response('Not found',{status:404});
+              const pay = await tx.payment.create({ data:{ orgId, invoiceId, method, amount }});
+              const total = calcTotal(inv); const paid = inv.payments.reduce((a,b)=> a+Number(b.amount),0) + Number(amount) + Number(whtAmount||0);
+              const status = (paid+1e-6)>=total ? 'PAID':'PARTIALLY_PAID';
+              await tx.invoice.update({ where:{ id: inv.id }, data:{ status }});
+              const last = await tx.receipt.findFirst({ where:{ orgId }, orderBy:{ createdAt:'desc' }});
+              const number = nextDocNumber('RC-YYYYMM-####', last?.number);
+              const rc = await tx.receipt.create({ data:{ orgId, invoiceId: inv.id, number }});
+              return Response.json({ payment: pay, receipt: rc, total, paid, status });
+            });
+          }
+          TS
+
+          # Invoice PDF
+          cat > components/pdf/InvoicePDF.tsx <<'TSX'
+          /* @jsxRuntime classic */ /* @jsx jsx */
+          import React from 'react';
+          import { Document, Page, Text, View, StyleSheet, Image } from '@react-pdf/renderer';
+          export default function InvoicePDF({ invoice, qrDataUrl }: any){
+            const lang = invoice.contact?.language || 'th';
+            const t = (th:string,en:string)=> lang==='th'?th:en;
+            const total = invoice.items.reduce((a:any,it:any)=> a + Number(it.qty)*Number(it.unitPrice) - Number(it.lineDiscount||0), 0);
+            const vat = invoice.vatMode==='EXCLUSIVE'? total*0.07 : total - (total/1.07);
+            const grand = invoice.vatMode==='EXCLUSIVE'? total+vat : total;
+            const styles = StyleSheet.create({ page:{ padding:24, fontSize:10 }, row:{ flexDirection:'row', justifyContent:'space-between' }, h1:{ fontSize:16, marginBottom:8 }});
+            return <Document><Page size="A4" style={styles.page}>
+              <View style={styles.row}>
+                <View><Text style={styles.h1}>{t('ใบกำกับภาษี/ใบแจ้งหนี้','Tax Invoice / Invoice')}</Text>
+                <Text>{t('เลขที่','No.')}: {invoice.number}</Text>
+                <Text>{t('วันที่','Date')}: {new Date(invoice.createdAt).toLocaleDateString(lang==='th'?'th-TH':'en-US')}</Text></View>
+                <View>{invoice.org?.logoUrl? <Image src={invoice.org.logoUrl} style={{width:80,height:80}}/>:null}</View>
+              </View>
+              <View style={{marginVertical:8}}>
+                <Text>{t('ลูกค้า','Bill To')}: {invoice.contact?.name||'-'}</Text>
+                <Text>{invoice.contact?.billingAddr||''}</Text>
+              </View>
+              {invoice.items.map((it:any,i:number)=>(
+                <View key={i} style={styles.row}><Text>{it.description||it.itemId}</Text><Text>{Number(it.qty)} x {Number(it.unitPrice).toFixed(2)}</Text></View>
+              ))}
+              <View style={{marginTop:8}}>
+                <Text>{t('ยอดก่อนภาษี','Subtotal')}: {total.toFixed(2)} THB</Text>
+                <Text>VAT 7%: {vat.toFixed(2)} THB</Text>
+                <Text style={{fontWeight:'bold'}}>{t('ยอดสุทธิ','Grand Total')}: {grand.toFixed(2)} THB</Text>
+              </View>
+              <View style={{ marginTop:16, flexDirection:'row', gap:12, alignItems:'center' }}>
+                <View><Text>{t('ชำระผ่าน PromptPay','Pay via PromptPay')}</Text><Text>{invoice.org?.promptpayId||'-'}</Text></View>
+                {qrDataUrl? <Image src={qrDataUrl} style={{width:100,height:100}}/>:null}
+              </View>
+            </Page></Document>;
+          }
+          TSX
+
+          cat > app/api/documents/[id]/pdf/route.ts <<'TS'
+          import { PrismaClient } from '@prisma/client';
+          import { pdf } from '@react-pdf/renderer';
+          import InvoicePDF from '@/components/pdf/InvoicePDF';
+          import { buildPromptPayPayload, renderPromptPayQR } from '@/lib/promptpay';
+          const prisma = new PrismaClient();
+          export async function GET(req:Request,{params}:{params:{id:string}}){
+            const inv = await prisma.invoice.findUnique({ where:{ id: params.id }, include:{ items:true, contact:true, org:true }});
+            if(!inv) return new Response('Not found',{status:404});
+            const total = inv.items.reduce((a:any,it:any)=> a + Number(it.qty)*Number(it.unitPrice) - Number(it.lineDiscount||0), 0);
+            const vat = inv.vatMode==='EXCLUSIVE'? total*0.07 : total - (total/1.07);
+            const grand = inv.vatMode==='EXCLUSIVE'? total+vat : total;
+            const payload = buildPromptPayPayload(inv.org?.promptpayId||'', grand);
+            const qr = await renderPromptPayQR(payload, 220);
+            const doc = InvoicePDF({ invoice: inv, qrDataUrl: qr });
+            const buf = await pdf(doc).toBuffer();
+            return new Response(buf,{ headers:{'Content-Type':'application/pdf','Content-Disposition':`inline; filename="${inv.number}.pdf"` }});
+          }
+          TS
+
+          # Reports (MVP)
+          cat > app/api/reports/vat/route.ts <<'TS'
+          import { PrismaClient } from '@prisma/client';
+          const prisma = new PrismaClient();
+          export async function GET(req:Request){
+            const { searchParams } = new URL(req.url); const orgId = searchParams.get('orgId')!;
+            const invs = await prisma.invoice.findMany({ where:{ orgId, status:{ in:['ISSUED','PARTIALLY_PAID','PAID'] }}, include:{ items:true }});
+            const docs = invs.map(inv=>{ const sub = inv.items.reduce((a,it)=> a + Number(it.qty)*Number(it.unitPrice) - Number(it.lineDiscount||0), 0); const vat = inv.vatMode==='EXCLUSIVE'? +(sub*0.07).toFixed(2) : +(sub - sub/1.07).toFixed(2); return { number: inv.number, vat };});
+            return Response.json({ vatSale: docs.reduce((a,b)=>a+b.vat,0), docs });
+          }
+          TS
+
+          cat > app/api/reports/gl/route.ts <<'TS'
+          import { PrismaClient } from '@prisma/client';
+          const prisma = new PrismaClient();
+          export async function GET(req:Request){
+            const { searchParams } = new URL(req.url); const orgId = searchParams.get('orgId')!;
+            const entries = await prisma.gLEntry.findMany({ where:{ journal:{ orgId }}, include:{ account:true }});
+            const map = new Map<string,{name:string,debit:number,credit:number}>();
+            for(const e of entries){ const k=e.account.code; if(!map.has(k)) map.set(k,{name:e.account.name,debit:0,credit:0}); const r=map.get(k)!; r.debit+=Number(e.debit); r.credit+=Number(e.credit); }
+            return Response.json({ trial: Array.from(map,([code,v])=>({code,...v})) });
+          }
+          TS
+
+          # Withholding PDF (basic)
+          cat > app/api/withholdings/[id]/pdf/route.ts <<'TS'
+          import { PrismaClient } from '@prisma/client';
+          import { Document, Page, Text, StyleSheet, pdf } from '@react-pdf/renderer';
+          const prisma = new PrismaClient(); const styles = StyleSheet.create({ page:{ padding:24, fontSize:10 }, h1:{ fontSize:14, marginBottom:8 }});
+          export async function GET(req:Request,{params}:{params:{id:string}}){
+            const w = await prisma.withholding.findUnique({ where:{ id: params.id }, include:{ org:true, invoice:true }});
+            if(!w) return new Response('Not found',{status:404});
+            const Doc = () => (<Document><Page size="A4" style={styles.page}><Text style={styles.h1}>หนังสือรับรองการหักภาษี ณ ที่จ่าย ({w.type==='PND3'?'ภ.ง.ด.3':'ภ.ง.ด.53'})</Text><Text>ผู้จ่าย: {w.org.name}</Text><Text>อ้างอิง: {w.invoice?.number||'-'}</Text><Text>ฐานภาษี: {Number(w.baseAmount).toFixed(2)} บาท</Text><Text>อัตรา: {Number(w.rate).toFixed(2)} %</Text><Text>ภาษีหัก: {Number(w.amount).toFixed(2)} บาท</Text></Page></Document>);
+            const buf = await pdf(<Doc/>).toBuffer(); return new Response(buf,{headers:{'Content-Type':'application/pdf'}});
+          }
+          TS
+
+          # Simple sign-in page
+          cat > app/(auth)/sign-in/page.tsx <<'TSX'
+          'use client'
+          import { signIn } from 'next-auth/react'; import { useForm } from 'react-hook-form';
+          export default function SignIn(){ const { register, handleSubmit } = useForm<{email:string;password:string}>(); return (
+            <div className="min-h-screen flex items-center justify-center p-6"><form className="w-full max-w-sm space-y-4" onSubmit={handleSubmit(async v=>signIn('credentials',{email:v.email,password:v.password,callbackUrl:'/' }))}>
+              <h1 className="text-2xl font-bold">เข้าสู่ระบบ</h1>
+              <input className="input" placeholder="Email" {...register('email')} />
+              <input className="input" type="password" placeholder="Password" {...register('password')} />
+              <button className="btn btn-primary w-full" type="submit">เข้าสู่ระบบ</button>
+            </form></div> ); }
+          TSX
+
+          # .env.example
+          cat > .env.example <<'ENV'
+          NEXTAUTH_URL=http://localhost:3000
+          NEXTAUTH_SECRET=replace_with_strong_secret
+          DATABASE_URL=postgresql://postgres:password@db.xxxxx.supabase.co:5432/postgres
+          GOOGLE_CLIENT_ID=
+          GOOGLE_CLIENT_SECRET=
+          NEXT_PUBLIC_SUPABASE_URL=https://xxxx.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY=
+          SUPABASE_SERVICE_ROLE_KEY=
+          ENV
+
+          # minimal README
+          cat > README.md <<'MD'
+          # FlowLite (Thai Accounting PWA)
+          ดาวน์โหลด ZIP: ไปที่ **Releases** (ขวาบน) แล้วกดล่าสุด
+          ## Run local
+          npm i
+          npm run db:dev
+          npm run db:seed
+          npm run dev
+          MD
+
+      - name: Install deps
+        run: npm install
+
+      - name: Create source zip
+        run: npm run pack:zip
+
+      - name: Commit & push code
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "chore(bootstrap): generate FlowLite project scaffolding" || echo "no changes"
+          git push
+
+      - name: Create Release with ZIP
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.0
+          name: FlowLite v0.1.0 (bootstrap)
+          body: |
+            Initial FlowLite scaffolding (Next.js 14 PWA, Prisma, basic APIs, PDF).
+            See README for local run steps.
+          files: |
+            dist/flow-account-source.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
