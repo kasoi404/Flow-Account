@@ -1,0 +1,8 @@
+.env
+.next/
+node_modules/
+*.log
+package-lock.json
+prisma/dev.db
+prisma/dev.db-journal
+
