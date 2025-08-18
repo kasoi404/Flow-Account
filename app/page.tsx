@@ -5,6 +5,8 @@
 +
  export default function Home(){
    return (
+   )
+ }
 -    <main style={{padding:16}}>
 -      <h1>FlowLite</h1>
 -      <p>Minimal bootstrap ready.</p>
