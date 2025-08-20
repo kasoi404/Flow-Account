@@ -1,0 +1,39 @@
+"use client";
+import { useState } from 'react';
+import Link from 'next/link';
+
+export default function LoginPage() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  const onSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    if (res.ok) {
+      window.location.href = '/dashboard';
+    } else {
+      const data = await res.json();
+      setError(data.error || 'Login failed');
+    }
+  };
+
+  return (
+    <main className="max-w-md mx-auto space-y-6">
+      <h1 className="text-2xl font-semibold">Login</h1>
+      <form onSubmit={onSubmit} className="card p-6 space-y-4">
+        <input className="input" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <input className="input" type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        {error && <p className="text-red-400">{error}</p>}
+        <button className="btn-primary" type="submit">Sign in</button>
+      </form>
+      <p className="text-white/60">No account? <Link className="underline" href="/auth/register">Register</Link></p>
+    </main>
+  );
+}
+

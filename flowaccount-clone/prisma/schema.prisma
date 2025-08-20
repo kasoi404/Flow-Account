@@ -1,0 +1,79 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  passwordHash  String
+  name          String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  customers     Customer[]
+  products      Product[]
+  invoices      Invoice[] @relation("UserInvoices")
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  name      String
+  email     String?
+  phone     String?
+  address   String?
+  taxId     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  invoices  Invoice[]
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  user        User     @relation(fields: [userId], references: [id])
+  userId      String
+  name        String
+  description String?
+  unitPrice   Decimal
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  items       InvoiceItem[]
+}
+
+model Invoice {
+  id            String        @id @default(cuid())
+  user          User          @relation("UserInvoices", fields: [userId], references: [id])
+  userId        String
+  customer      Customer      @relation(fields: [customerId], references: [id])
+  customerId    String
+  issueDate     DateTime
+  dueDate       DateTime?
+  status        String        @default("DRAFT")
+  notes         String?
+  subtotal      Decimal
+  tax           Decimal
+  total         Decimal
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  items         InvoiceItem[]
+}
+
+model InvoiceItem {
+  id          String   @id @default(cuid())
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id])
+  invoiceId   String
+  product     Product? @relation(fields: [productId], references: [id])
+  productId   String?
+  description String
+  quantity    Int
+  unitPrice   Decimal
+  lineTotal   Decimal
+}
+
+// Note: SQLite does not support enums natively; using String for status
+
